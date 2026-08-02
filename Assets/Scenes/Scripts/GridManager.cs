@@ -12,38 +12,84 @@ public class GridManager : MonoBehaviour
     public ScoreManager scoreManager;
 
     private Cell[,] gridArray;
-    private List<GameObject> spawnedCells = new List<GameObject>();
+    private GameObject[,] cellObjects; // Genişleme sırasında hücreleri koruyabilmek için 2D referans
 
-    void Start()
+    void Awake()
     {
+        // Awake() kullanıyoruz çünkü Unity, SAHNEDEKİ TÜM objelerin Awake()'ini
+        // bitirmeden hiçbirinin Start()'ına geçmez. Bu sayede ShapeSpawner'ın
+        // Start()'ı çalıştığında grid'in kesinlikle hazır olduğu garanti edilir.
+        // (Start() kullansaydık, hangi objenin Start()'ının önce çalışacağı
+        // garanti değildi ve bu "boş board'da bile sığmıyor" hatasına yol açabilirdi.)
         CreateGrid();
     }
 
-    // 1. Izgarayı Oluşturma ve Genişletme
+    // 1. Izgarayı İLK KEZ oluşturma (oyun başında bir kez çağrılır)
     public void CreateGrid()
     {
-        // Eski hücreleri temizle (Harita büyürken eskileri siler)
-        foreach (GameObject cell in spawnedCells)
+        // Varsa eski hücreleri temizle
+        if (cellObjects != null)
         {
-            Destroy(cell);
+            foreach (GameObject cell in cellObjects)
+            {
+                if (cell != null) Destroy(cell);
+            }
         }
-        spawnedCells.Clear();
 
         gridArray = new Cell[currentSize, currentSize];
+        cellObjects = new GameObject[currentSize, currentSize];
 
         for (int x = 0; x < currentSize; x++)
         {
             for (int y = 0; y < currentSize; y++)
             {
-                Vector3 pos = new Vector3(x * cellSize, y * cellSize, 0);
-                GameObject newCellObj = Instantiate(cellPrefab, pos, Quaternion.identity, transform);
-                newCellObj.name = $"Cell_{x}_{y}";
-                
-                Cell cellScript = newCellObj.GetComponent<Cell>();
-                gridArray[x, y] = cellScript;
-                spawnedCells.Add(newCellObj);
+                SpawnCell(x, y);
             }
         }
+        CenterCamera();
+    }
+
+    void SpawnCell(int x, int y)
+    {
+        Vector3 pos = new Vector3(x * cellSize, y * cellSize, 0);
+        GameObject newCellObj = Instantiate(cellPrefab, pos, Quaternion.identity, transform);
+        newCellObj.name = $"Cell_{x}_{y}";
+
+        Cell cellScript = newCellObj.GetComponent<Cell>();
+        gridArray[x, y] = cellScript;
+        cellObjects[x, y] = newCellObj;
+    }
+
+    // Izgarayı büyütürken MEVCUT hücreleri ve doluluk durumlarını KORUR,
+    // sadece eksik olan yeni satır/sütunları ekler. (Eski CreateGrid() her şeyi siliyordu!)
+    void ExpandGrid(int newSize)
+    {
+        Cell[,] oldGrid = gridArray;
+        GameObject[,] oldObjects = cellObjects;
+        int oldSize = currentSize;
+
+        gridArray = new Cell[newSize, newSize];
+        cellObjects = new GameObject[newSize, newSize];
+
+        for (int x = 0; x < newSize; x++)
+        {
+            for (int y = 0; y < newSize; y++)
+            {
+                if (x < oldSize && y < oldSize)
+                {
+                    // Eski hücreyi (ve dolu/boş durumunu) aynen koru
+                    gridArray[x, y] = oldGrid[x, y];
+                    cellObjects[x, y] = oldObjects[x, y];
+                }
+                else
+                {
+                    // Yeni açılan alan için hücre oluştur
+                    SpawnCell(x, y);
+                }
+            }
+        }
+
+        currentSize = newSize;
         CenterCamera();
     }
 
@@ -52,7 +98,7 @@ public class GridManager : MonoBehaviour
     {
         float centerPos = (currentSize * cellSize) / 2f - (cellSize / 2f);
         Camera.main.transform.position = new Vector3(centerPos, centerPos, -10);
-        
+
         // Grid büyüdükçe kamerayı uzaklaştır
         Camera.main.orthographicSize = currentSize + 2;
     }
@@ -65,21 +111,21 @@ public class GridManager : MonoBehaviour
         foreach (Vector3 worldPos in blockPositions)
         {
             Cell closestCell = GetClosestCell(worldPos);
-            
-            // Eğer blok grid dışındaysa veya hücre doluysa yerleşemez
-            if (closestCell == null || closestCell.isOccupied)
+
+            // Grid dışındaysa, doluysa veya (nadir bir snapping hatasıyla) aynı hücre iki kez seçildiyse yerleşemez
+            if (closestCell == null || closestCell.isOccupied || targetCells.Contains(closestCell))
                 return false;
 
             targetCells.Add(closestCell);
         }
 
-        // Eğer buraya geldiyse tüm parçalar uygun demektir, yerleştir!
+        // Tüm parçalar uygun, yerleştir
         foreach (Cell cell in targetCells)
         {
             cell.SetOccupied(color);
         }
 
-        CheckBoard(); // Her yerleştirmeden sonra tahtayı kontrol et
+        CheckBoard(); // Tek ve tek kontrol noktası burası - Shape.cs'de TEKRAR çağırmayın!
         return true;
     }
 
@@ -87,7 +133,7 @@ public class GridManager : MonoBehaviour
     Cell GetClosestCell(Vector3 worldPos)
     {
         Cell closest = null;
-        float minDistance = 0.5f; // Hücreye ne kadar yakın olmalı?
+        float minDistance = 0.5f;
 
         foreach (Cell cell in gridArray)
         {
@@ -107,7 +153,6 @@ public class GridManager : MonoBehaviour
         List<int> rowsToDelete = new List<int>();
         List<int> colsToDelete = new List<int>();
 
-        // Satırları kontrol et
         for (int y = 0; y < currentSize; y++)
         {
             bool isFull = true;
@@ -118,7 +163,6 @@ public class GridManager : MonoBehaviour
             if (isFull) rowsToDelete.Add(y);
         }
 
-        // Sütunları kontrol et
         for (int x = 0; x < currentSize; x++)
         {
             bool isFull = true;
@@ -129,8 +173,11 @@ public class GridManager : MonoBehaviour
             if (isFull) colsToDelete.Add(x);
         }
 
-        // Temizleme işlemini başlat
-        ClearLines(rowsToDelete, colsToDelete);
+        // Silinecek bir şey yoksa ScoreManager'ı hiç tetikleme (streak boşuna sıfırlanmasın)
+        if (rowsToDelete.Count > 0 || colsToDelete.Count > 0)
+        {
+            ClearLines(rowsToDelete, colsToDelete);
+        }
     }
 
     void ClearLines(List<int> rows, List<int> cols)
@@ -145,22 +192,59 @@ public class GridManager : MonoBehaviour
             for (int y = 0; y < currentSize; y++) gridArray[x, y].Clear();
         }
 
-        // Skor ve Streak hesapla
         int totalCleared = rows.Count + cols.Count;
         scoreManager.AddScore(totalCleared);
 
-        // Harita Büyütme Kontrolü (Her 1000 puanda bir büyüme örn: 5x5 -> 6x6)
         CheckForExpansion();
     }
 
     void CheckForExpansion()
     {
-        // Skor 1000'in katlarına ulaştığında ve max 10x10 olana kadar büyüt
+        // Skor eşiği aşıldığında ve max 10x10 olana kadar büyüt
         if (scoreManager.totalScore >= (currentSize - 4) * 1000 && currentSize < 10)
         {
-            currentSize++;
-            CreateGrid();
+            int newSize = currentSize + 1;
+            ExpandGrid(newSize); // Artık mevcut bloklar SİLİNMİYOR
             Debug.Log("Harita Genişledi! Yeni Boyut: " + currentSize);
         }
+    }
+
+    // 5. Oyun Bitti mi? Verilen şekillerden HİÇBİRİ tahtaya sığmıyorsa true döner.
+    public bool HasAnyValidMove(List<ShapeData> shapes)
+    {
+        // Grid henüz oluşturulmadıysa (teorik olarak artık imkansız ama garanti olsun),
+        // hatalı "oyun bitti" tetiklenmesin diye true dönüyoruz.
+        if (gridArray == null) return true;
+
+        foreach (ShapeData shape in shapes)
+        {
+            if (shape == null) continue;
+            if (CanShapeFitAnywhere(shape)) return true;
+        }
+        return false;
+    }
+
+    bool CanShapeFitAnywhere(ShapeData shape)
+    {
+        for (int startX = 0; startX < currentSize; startX++)
+        {
+            for (int startY = 0; startY < currentSize; startY++)
+            {
+                bool fits = true;
+                foreach (Vector2Int cellOffset in shape.cells)
+                {
+                    int gx = startX + cellOffset.x;
+                    int gy = startY + cellOffset.y;
+
+                    if (gx < 0 || gx >= currentSize || gy < 0 || gy >= currentSize || gridArray[gx, gy].isOccupied)
+                    {
+                        fits = false;
+                        break;
+                    }
+                }
+                if (fits) return true;
+            }
+        }
+        return false;
     }
 }
